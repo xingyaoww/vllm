@@ -244,3 +244,89 @@ def as_reward_model(cls: _T) -> _T:
         _get_pooling_model_name(cls.__name__, "ForReward")
 
     return ModelForReward  # type: ignore
+
+
+def as_token_classification_model(cls: _T) -> _T:
+    """
+    Subclass an existing vLLM model to support token classification.
+
+    By default, we return token-level classification logits for each token in the sequence.
+    This is useful for tasks like named entity recognition, part-of-speech tagging, etc.
+
+    Note:
+        We assume that the token classification head is a single linear layer
+        stored as the attribute `score` of the top-level model;
+        please implement your own model if this is not the case.
+    """
+    # Avoid modifying existing token classification models
+    if is_pooling_model(cls):
+        return cls
+
+    # Lazy import
+    from vllm.config import VllmConfig
+    from vllm.model_executor.layers.linear import RowParallelLinear
+    from vllm.model_executor.layers.pooler import PoolingType, PoolerOutput
+    from vllm.model_executor.pooling_metadata import PoolingMetadata
+    from vllm.sequence import IntermediateTensors
+
+    from .utils import maybe_prefix
+
+    # Create a base pooling model with ALL pooling type to get all token representations
+    ModelForPooling = _create_pooling_model_cls(
+        cls,
+        default_pooling_type=PoolingType.ALL,
+        default_normalize=False,
+        default_softmax=False,
+    )
+
+    class ModelForTokenClassification(ModelForPooling):
+        def __init__(
+            self,
+            *,
+            vllm_config: "VllmConfig",
+            prefix: str = "",
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
+
+            config = vllm_config.model_config.hf_config
+            quant_config = vllm_config.quant_config
+            
+            # Create a classifier head for token classification
+            self.dropout = nn.Dropout(getattr(config, "classifier_dropout", 0.1))
+            self.score = RowParallelLinear(
+                config.hidden_size,
+                getattr(config, "num_labels", 2),  # Default to binary classification if not specified
+                quant_config=quant_config,
+                input_is_parallel=False,
+                bias=True,
+                prefix=maybe_prefix(prefix, "score")
+            )
+
+        def pooler(
+            self,
+            hidden_states: torch.Tensor,
+            pooling_metadata: PoolingMetadata,
+        ) -> PoolerOutput:
+            # First get all token representations using the base pooler
+            pooler_output = super().pooler(hidden_states, pooling_metadata)
+            
+            # Apply dropout and classification head to each token's representation
+            token_outputs = []
+            for seq_output in pooler_output.outputs:
+                # Apply dropout to the sequence output
+                sequence_output = self.dropout(seq_output.data)
+                # Apply the classification head to get token-level logits
+                logits, _ = self.score(sequence_output)
+                token_outputs.append(logits)
+            
+            # Return the token classification logits
+            return PoolerOutput(outputs=[
+                type(pooler_output.outputs[0])(data=logits)
+                for logits in token_outputs
+            ])
+
+    ModelForTokenClassification.__name__ = \
+        _get_pooling_model_name(cls.__name__, "ForTokenClassification")
+
+    return ModelForTokenClassification  # type: ignore

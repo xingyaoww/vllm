@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Example script for using vLLM with token classification models.
-This example shows how to use a model like Qwen2ForTokenClassification with vLLM.
+Example script for using vLLM with token-level reward models.
+This example shows how to use a model like Qwen2ForTokenClassification with vLLM
+by adapting it as a token-level reward model.
 """
 
 import argparse
@@ -18,12 +19,12 @@ from vllm import LLM, SamplingParams
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Example script for token classification with vLLM")
+        description="Example script for token-level reward models with vLLM")
     parser.add_argument("--model", type=str, required=True, help="Model name or path")
     parser.add_argument("--tokenizer", type=str, help="Tokenizer name or path")
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
     parser.add_argument("--input-text", type=str, default="The quick brown fox jumps over the lazy dog.")
-    parser.add_argument("--num-labels", type=int, default=2, help="Number of labels for token classification")
+    parser.add_argument("--num-labels", type=int, default=2, help="Number of labels for token-level rewards")
     return parser.parse_args()
 
 
@@ -32,13 +33,13 @@ def main(args):
     tokenizer_name = args.tokenizer or args.model
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     
-    # Initialize the LLM for token classification
+    # Initialize the LLM for token-level rewards
     llm = LLM(
         model=args.model,
         tokenizer=tokenizer_name,
         tensor_parallel_size=args.tensor_parallel_size,
         trust_remote_code=True,
-        task="token_classification",
+        task="token_reward",
         model_config={"num_labels": args.num_labels},
     )
     
@@ -46,12 +47,12 @@ def main(args):
     inputs = tokenizer(args.input_text, return_tensors="pt")
     input_ids = inputs["input_ids"].tolist()[0]
     
-    # Get token-level classifications
+    # Get token-level rewards
     outputs = llm.encode(args.input_text)
     
     # Process and print the results
     print(f"Input text: {args.input_text}")
-    print("\nToken-level classifications:")
+    print("\nToken-level rewards:")
     
     # Get the token-level logits
     token_logits = outputs[0].data

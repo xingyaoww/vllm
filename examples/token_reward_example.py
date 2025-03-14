@@ -9,22 +9,31 @@ by adapting it as a token-level reward model.
 
 import argparse
 import json
-from typing import List, Optional
 
 import torch
 from transformers import AutoTokenizer
 
-from vllm import LLM, SamplingParams
+from vllm import LLM
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Example script for token-level reward models with vLLM")
-    parser.add_argument("--model", type=str, required=True, help="Model name or path")
-    parser.add_argument("--tokenizer", type=str, help="Tokenizer name or path")
-    parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
-    parser.add_argument("--input-text", type=str, default="The quick brown fox jumps over the lazy dog.")
-    parser.add_argument("--num-labels", type=int, default=2, help="Number of labels for token-level rewards")
+    parser.add_argument(
+        "--model", type=str, required=True, help="Model name or path")
+    parser.add_argument(
+        "--tokenizer", type=str, help="Tokenizer name or path")
+    parser.add_argument(
+        "--tensor-parallel-size", "-tp", type=int, default=1)
+    parser.add_argument(
+        "--input-text",
+        type=str,
+        default="The quick brown fox jumps over the lazy dog.")
+    parser.add_argument(
+        "--num-labels",
+        type=int,
+        default=2,
+        help="Number of labels for token-level rewards")
     return parser.parse_args()
 
 
@@ -58,7 +67,8 @@ def main(args):
     token_logits = outputs[0].data
     
     # Convert logits to probabilities
-    token_probs = torch.nn.functional.softmax(torch.tensor(token_logits), dim=-1)
+    token_probs = torch.nn.functional.softmax(
+        torch.tensor(token_logits), dim=-1)
     
     # Print token-by-token results
     tokens = tokenizer.convert_ids_to_tokens(input_ids)
@@ -67,7 +77,10 @@ def main(args):
         label_probs = {f"Label {j}": float(p) for j, p in enumerate(probs)}
         predicted_label = probs.argmax().item()
         
-        print(f"Token {i}: '{token}' - Predicted: Label {predicted_label} - Probabilities: {json.dumps(label_probs)}")
+        print(
+            f"Token {i}: '{token}' - "
+            f"Predicted: Label {predicted_label} - "
+            f"Probabilities: {json.dumps(label_probs)}")
 
 
 if __name__ == "__main__":

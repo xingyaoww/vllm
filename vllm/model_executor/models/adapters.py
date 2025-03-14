@@ -250,10 +250,11 @@ def as_token_reward_model(cls: _T) -> _T:
     """
     Subclass an existing vLLM model to support token-level reward modeling.
 
-    This adapter creates a token-level reward model that applies a classification
-    head to each token's representation, allowing for token-by-token predictions.
-    This is useful for tasks like token-level quality assessment, token-level
-    alignment, and other token-level prediction tasks.
+    This adapter creates a token-level reward model that applies a
+    classification head to each token's representation, allowing for
+    token-by-token predictions. This is useful for tasks like token-level
+    quality assessment, token-level alignment, and other token-level
+    prediction tasks.
 
     Note:
         We assume that no extra layers are added to the original model;
@@ -271,7 +272,7 @@ def as_token_reward_model(cls: _T) -> _T:
 
     from .utils import maybe_prefix
 
-    # Create a base pooling model with ALL pooling type to get all token representations
+    # Create a base pooling model with ALL pooling type
     ModelForPooling = _create_pooling_model_cls(
         cls,
         default_pooling_type=PoolingType.ALL,
@@ -293,10 +294,14 @@ def as_token_reward_model(cls: _T) -> _T:
             quant_config = vllm_config.quant_config
             
             # Create a classifier head for token-level rewards
-            self.dropout = nn.Dropout(getattr(config, "classifier_dropout", 0.1))
+            dropout_rate = getattr(config, "classifier_dropout", 0.1)
+            self.dropout = nn.Dropout(dropout_rate)
+            
+            # Default to binary classification if not specified
+            num_labels = getattr(config, "num_labels", 2)
             self.score = RowParallelLinear(
                 config.hidden_size,
-                getattr(config, "num_labels", 2),  # Default to binary classification if not specified
+                num_labels,
                 quant_config=quant_config,
                 input_is_parallel=False,
                 bias=True,
@@ -311,7 +316,7 @@ def as_token_reward_model(cls: _T) -> _T:
             # First get all token representations using the base pooler
             pooler_output = super().pooler(hidden_states, pooling_metadata)
             
-            # Apply dropout and classification head to each token's representation
+            # Apply dropout and classification head to each token
             token_outputs = []
             for seq_output in pooler_output.outputs:
                 # Apply dropout to the sequence output

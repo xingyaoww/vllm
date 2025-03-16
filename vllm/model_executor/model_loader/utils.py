@@ -16,8 +16,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.adapters import (as_classification_model,
                                                  as_embedding_model,
-                                                 as_reward_model,
-                                                 as_token_classification_model)
+                                                 as_reward_model)
 
 logger = init_logger(__name__)
 
@@ -114,9 +113,9 @@ def get_model_architecture(
     elif model_config.task == "classify":
         model_cls = as_classification_model(model_cls)
     elif model_config.task == "reward":
-        model_cls = as_reward_model(model_cls)
-    elif model_config.task == "token_classification":
-        model_cls = as_token_classification_model(model_cls)
+        model_cls = as_reward_model(model_cls, token_level=False)
+    elif model_config.task == "token_reward":
+        model_cls = as_reward_model(model_cls, token_level=True)
 
     return model_cls, arch
 

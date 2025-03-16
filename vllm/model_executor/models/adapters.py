@@ -309,11 +309,7 @@ def as_token_reward_model(cls: _T) -> _T:
             hidden_states = super().forward(input_ids, positions,
                                             intermediate_tensors,
                                             inputs_embeds)
-            print("HIDDEN_STATES.shape", hidden_states.shape)
-            print("SCORE.weight", self.score.weight)
-            print("SCORE.bias", self.score.bias)
             logits, _ = self.score(hidden_states)
-            print("LOGITS.shape", logits.shape)
             return logits
 
 

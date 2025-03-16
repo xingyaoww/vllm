@@ -529,6 +529,7 @@ class ModelConfig:
             ("ForCausalLM", "generate"),
             ("ForConditionalGeneration", "generate"),
             ("ForSequenceClassification", "classify"),
+            ("ForTokenClassification", "token_reward"),
             ("ChatModel", "generate"),
             ("LMHeadModel", "generate"),
             ("EmbeddingModel", "embed"),

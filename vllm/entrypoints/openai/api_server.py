@@ -658,6 +658,10 @@ TASK_HANDLERS: dict[str, dict[str, tuple]] = {
         "messages": (PoolingChatRequest, create_pooling),
         "default": (PoolingCompletionRequest, create_pooling),
     },
+    "token_reward": {
+        "messages": (PoolingChatRequest, create_pooling),
+        "default": (PoolingCompletionRequest, create_pooling),
+    },
     "classify": {
         "messages": (PoolingChatRequest, create_pooling),
         "default": (PoolingCompletionRequest, create_pooling),

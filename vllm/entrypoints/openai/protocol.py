@@ -1162,6 +1162,7 @@ class PoolingResponseData(OpenAIBaseModel):
     index: int
     object: str = "pooling"
     data: Union[list[list[float]], list[float], str]
+    prompt_token_ids: list[int] | None = None
 
 
 class PoolingResponse(OpenAIBaseModel):

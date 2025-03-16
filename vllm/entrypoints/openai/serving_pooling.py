@@ -223,6 +223,7 @@ class OpenAIServingPooling(OpenAIServing):
             item = PoolingResponseData(
                 index=idx,
                 data=_get_data(final_res.outputs, encoding_format),
+                prompt_token_ids=final_res.prompt_token_ids,
             )
             prompt_token_ids = final_res.prompt_token_ids
 

@@ -264,7 +264,6 @@ def as_token_reward_model(cls: _T) -> _T:
     # Lazy import
     from vllm.model_executor.layers.pooler import PoolingType
     from vllm.model_executor.layers.linear import RowParallelLinear
-    from vllm.model_executor.layers.pooler import PoolingType
     from vllm.sequence import IntermediateTensors
 
     from .utils import maybe_prefix
@@ -310,6 +309,7 @@ def as_token_reward_model(cls: _T) -> _T:
                                             intermediate_tensors,
                                             inputs_embeds)
             logits, _ = self.score(hidden_states)
+            logits = logits.squeeze(dim=-1)
             return logits
 
 

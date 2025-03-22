@@ -548,7 +548,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if top_logprobs < 0:
                 raise ValueError("`top_logprobs` must be a positive value.")
 
-            if not data.get("logprobs"):
+            if top_logprobs > 0 and not data.get("logprobs"):
                 raise ValueError(
                     "when using `top_logprobs`, `logprobs` must be set to true."
                 )
@@ -1162,6 +1162,7 @@ class PoolingResponseData(OpenAIBaseModel):
     index: int
     object: str = "pooling"
     data: Union[list[list[float]], list[float], str]
+    prompt_token_ids: list[int] | None = None
 
 
 class PoolingResponse(OpenAIBaseModel):

@@ -244,3 +244,76 @@ def as_reward_model(cls: _T) -> _T:
         _get_pooling_model_name(cls.__name__, "ForReward")
 
     return ModelForReward  # type: ignore
+
+
+def as_token_reward_model(cls: _T) -> _T:
+    """
+    Subclass an existing vLLM model to support token-level reward modeling.
+
+    This adapter creates a token-level reward model that applies a
+    classification head to each token's representation, allowing for
+    token-by-token predictions. This is useful for tasks like token-level
+    quality assessment, token-level alignment, and other token-level
+    prediction tasks.
+
+    Note:
+        We assume that no extra layers are added to the original model;
+        please implement your own model if this is not the case.
+    """
+
+    # Lazy import
+    from vllm.model_executor.layers.pooler import PoolingType
+    from vllm.model_executor.layers.linear import RowParallelLinear
+    from vllm.sequence import IntermediateTensors
+
+    from .utils import maybe_prefix
+
+    ModelForPooling = _create_pooling_model_cls(
+        cls,
+        default_pooling_type=PoolingType.ALL,
+        default_normalize=False,
+        default_softmax=False,
+    )
+
+    class ModelForTokenReward(ModelForPooling):
+
+        def __init__(
+            self,
+            *,
+            vllm_config: "VllmConfig",
+            prefix: str = "",
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
+
+            config = vllm_config.model_config.hf_config
+            quant_config = vllm_config.quant_config
+            print("CONFIG.NUM_LABELS", config.num_labels)
+
+            self.score = RowParallelLinear(config.hidden_size,
+                                           config.num_labels,
+                                           quant_config=quant_config,
+                                           input_is_parallel=False,
+                                           bias=True,
+                                           prefix=maybe_prefix(
+                                               prefix, "score"))
+
+        def forward(
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            intermediate_tensors: Optional[IntermediateTensors] = None,
+            inputs_embeds: Optional[torch.Tensor] = None,
+        ) -> torch.Tensor:
+            hidden_states = super().forward(input_ids, positions,
+                                            intermediate_tensors,
+                                            inputs_embeds)
+            logits, _ = self.score(hidden_states)
+            logits = logits.squeeze(dim=-1)
+            return logits
+
+
+    ModelForTokenReward.__name__ = \
+        _get_pooling_model_name(cls.__name__, "ForTokenReward")
+
+    return ModelForTokenReward  # type: ignore

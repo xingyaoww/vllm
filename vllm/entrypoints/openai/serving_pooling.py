@@ -136,13 +136,7 @@ class OpenAIServingPooling(OpenAIServing):
                      truncate_prompt_tokens=truncate_prompt_tokens,
                      add_special_tokens=request.add_special_tokens,
                  )
-        except ValueError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
-        except TypeError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
-        except jinja2.TemplateError as e:
+        except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
@@ -223,6 +217,7 @@ class OpenAIServingPooling(OpenAIServing):
             item = PoolingResponseData(
                 index=idx,
                 data=_get_data(final_res.outputs, encoding_format),
+                prompt_token_ids=final_res.prompt_token_ids,
             )
             prompt_token_ids = final_res.prompt_token_ids
 

@@ -4,7 +4,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from functools import cached_property
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union, cast
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -22,7 +22,6 @@ from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.jsontree import JSONTree, json_map_leaves
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -43,18 +42,20 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import (MistralTokenizer,
                                                cached_tokenizer_from_config)
-from vllm.utils import flatten_2d_lists
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
-from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
+from .vision import (VisionEncoderInfo, resolve_visual_encoder_outputs,
+                     scatter_patch_features, select_patch_features)
 
 try:
     from xformers import ops as xops
     USE_XFORMERS_OPS = True
 except ImportError:
     USE_XFORMERS_OPS = False
+
+PATCH_MERGE = "patch_merge"
 
 
 class PixtralImagePixelInputs(TypedDict):
@@ -71,12 +72,9 @@ class PixtralImagePixelInputs(TypedDict):
     """
     A boolean mask indicating which image embeddings correspond
     to patch tokens.
-    
-    Shape: `(batch_size, num_images, num_embeds)`
-    """
 
-    num_patches: Union[torch.Tensor, list[torch.Tensor]]
-    """Shape: `(batch_size, num_images)`"""
+    Shape: `(batch_size * num_images, num_embeds)`
+    """
 
 
 class PixtralProcessorAdapter:
@@ -151,24 +149,20 @@ class PixtralProcessorAdapter:
         images_processed = list[torch.Tensor]()
         images_tokens = list[torch.Tensor]()
         images_embed_is_patch = list[torch.Tensor]()
-        images_num_patches = list[int]()
 
         for image in images:
             image_inputs = self.image_processor(ImageChunk(image=image))
-
             image_processed = torch.tensor(image_inputs.image)
             image_tokens = torch.tensor(image_inputs.tokens)
 
             images_processed.append(image_processed)
             images_tokens.append(image_tokens)
             images_embed_is_patch.append(image_tokens == image_token_id)
-            images_num_patches.append(len(image_tokens))
 
         return {
             "input_ids": torch.cat(images_tokens)[None].expand(len(text), -1),
             "images": images_processed,
             "embed_is_patch": images_embed_is_patch,
-            "num_patches": torch.tensor(images_num_patches),
         }
 
 
@@ -272,7 +266,6 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         return dict(
             images=MultiModalFieldConfig.batched("image"),
             embed_is_patch=MultiModalFieldConfig.batched("image"),
-            num_patches=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_prompt_updates(
@@ -353,6 +346,18 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         )
 
         self.vision_encoder = VisionTransformer(self.vision_args)
+
+        if self.vision_args.add_pre_mm_projector_layer_norm:
+            self.pre_mm_projector_norm = RMSNorm(self.vision_args.hidden_size,
+                                                 eps=1e-5)
+
+        if self.vision_args.mm_projector_id == PATCH_MERGE:
+            self.patch_merger = PatchMerger(
+                vision_encoder_dim=self.vision_args.hidden_size,
+                spatial_merge_size=self.vision_args.spatial_merge_size,
+                use_mlp_bias=False,
+            )
+
         self.vision_language_adapter = VisionLanguageAdapter(
             self.vision_args, dim=config.text_config.hidden_size)
 
@@ -381,16 +386,12 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise ValueError("Incorrect type of embed_is_patch. "
                              f"Got type: {type(embed_is_patch)}")
 
-        num_patches = kwargs.pop("num_patches")
-        if not isinstance(num_patches, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of num_patches. "
-                             f"Got type: {type(num_patches)}")
+        embed_is_patch = flatten_bn(embed_is_patch)
 
         return PixtralImagePixelInputs(
             type="pixel_values",
             images=flatten_bn(images),
             embed_is_patch=embed_is_patch,
-            num_patches=num_patches,
         )
 
     def _process_image_input(
@@ -398,42 +399,27 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_input: PixtralImagePixelInputs,
     ) -> tuple[torch.Tensor, ...]:
         images = image_input["images"]
-
         image_features = self.vision_encoder(images)
         feature_sizes = [
             image_feature.shape[0] for image_feature in image_features
         ]
-
-        image_embeds = self.vision_language_adapter(torch.cat(image_features))
+        image_features = torch.cat(image_features)
+        if self.vision_args.add_pre_mm_projector_layer_norm:
+            image_features = self.pre_mm_projector_norm(image_features)
+        if self.vision_args.mm_projector_id == PATCH_MERGE:
+            patch_size = self.vision_args.patch_size
+            spatial_merge_size_square = self.vision_args.spatial_merge_size**2
+            img_patch_dims = [(img.shape[1] // patch_size,
+                               img.shape[2] // patch_size) for img in images]
+            feature_sizes = [
+                feature_size // spatial_merge_size_square
+                for feature_size in feature_sizes
+            ]
+            image_features = self.patch_merger(image_features,
+                                               image_sizes=img_patch_dims)
+        image_embeds = self.vision_language_adapter(image_features)
         image_embeds = torch.split(image_embeds, feature_sizes)
         return image_embeds
-
-    def _get_mm_embeds(
-            self,
-            features: torch.Tensor,  # Shape: (num_patch, d)
-            num_patches: torch.Tensor,  # Shape: (num_images,)
-            embed_is_patch: torch.Tensor,  # Shape: (num_images, num_embeds)
-    ) -> tuple[torch.Tensor, ...]:
-        """Scatter the patch features into a contiguous tensor that corresponds
-        to the embedding tokens defined by the multimodal processor.
-
-        Mostly copied from `Molmo._get_mm_embeds`. See following fixme comment.
-        """
-        # Insert columns of nan values according to `embed_is_patch`. This work
-        # ideally should be done in `_process_image_input`, but
-        # `_process_image_input` is used in both V0 and V1 path. It's safer to
-        # put the logic here.
-        # FIXME: Move this logic to `_process_image_input` when v0 is
-        # deprecated. Merge this function with `Molmo._get_mm_embeds`.
-        num_patches_per_image: list[int] = num_patches.tolist()
-
-        embeds_flat = features.new_full(
-            (sum(num_patches_per_image), *features.shape[1:]),
-            fill_value=torch.nan,
-        )
-        embeds_flat[embed_is_patch.view(-1)] = features
-
-        return embeds_flat.split(num_patches_per_image)
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
@@ -443,15 +429,10 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         image_features = self._process_image_input(image_input)
 
-        if kwargs.get("v0_path", False):
-            return image_features
-
-        return flatten_2d_lists(
-            self._get_mm_embeds(*args) for args in zip(
-                image_features,
-                image_input["num_patches"],
-                image_input["embed_is_patch"],
-            ))
+        return scatter_patch_features(
+            image_features,
+            image_input["embed_is_patch"],
+        )
 
     def get_input_embeddings(
         self,
@@ -460,15 +441,10 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            # Extract the patch tokens
-            patch_embeddings = json_map_leaves(
-                lambda x: x[~x.isnan()].view(-1, *x.shape[1:]),
-                cast(JSONTree[torch.Tensor], multimodal_embeddings),
-            )
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
-                cast(NestedTensors, patch_embeddings),
+                select_patch_features(multimodal_embeddings),
                 self.vision_args.image_token_id,
             )
         return inputs_embeds
@@ -488,7 +464,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
-            kwargs.update({"v0_path": True})
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
@@ -524,8 +499,19 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         def is_vision_lang_adapter_weights(weight: Tuple[str, torch.Tensor]):
             return weight[0].startswith("vision_language_adapter")
 
+        def is_patch_merger(weight: Tuple[str, torch.Tensor]):
+            return weight[0].startswith("patch_merger")
+
+        def is_pre_mm_projector_norm(weight: Tuple[str, torch.Tensor]):
+            return weight[0].startswith("pre_mm_projector_norm")
+
         # Get references to parameters for direct loading
         vision_encoder_dict = dict(self.vision_encoder.named_parameters())
+        patch_merger_dict = dict(self.patch_merger.named_parameters(
+        )) if self.vision_args.mm_projector_id == PATCH_MERGE else dict()
+        pre_mm_projector_norm_dict = dict(
+            self.pre_mm_projector_norm.named_parameters(
+            )) if self.vision_args.add_pre_mm_projector_layer_norm else dict()
         vision_lang_adapter_dict = dict(
             self.vision_language_adapter.named_parameters())
 
@@ -536,6 +522,18 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                     # Load vision encoder weights directly
                     trimmed_name = '.'.join(name.split(".")[1:])
                     param = vision_encoder_dict[trimmed_name]
+                    with torch.no_grad():
+                        default_weight_loader(param, w)
+                elif is_patch_merger((name, w)):
+                    # Load vision patch merger weights directly
+                    trimmed_name = '.'.join(name.split(".")[1:])
+                    param = patch_merger_dict[trimmed_name]
+                    with torch.no_grad():
+                        default_weight_loader(param, w)
+                elif is_pre_mm_projector_norm((name, w)):
+                    # Load vision pre_mm_projector_norm weights directly
+                    trimmed_name = '.'.join(name.split(".")[1:])
+                    param = pre_mm_projector_norm_dict[trimmed_name]
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 elif is_vision_lang_adapter_weights((name, w)):
@@ -566,6 +564,9 @@ class VisionEncoderArgs:
     rope_theta: float  # for rope-2D
     image_token_id: int
     adapter_bias: bool = True
+    spatial_merge_size: int = 1
+    add_pre_mm_projector_layer_norm: bool = False
+    mm_projector_id: str = ""
 
 
 def _reshape_for_broadcast(freqs_cis: torch.Tensor,
@@ -789,10 +790,10 @@ class VisionTransformer(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            images: list of N_img images of variable sizes, 
+            images: list of N_img images of variable sizes,
                 each of shape (C, H, W)
         Returns:
-            image_features: tensor of token features for 
+            image_features: tensor of token features for
                 all tokens of all images of shape (N_toks, D)
         """
         # pass images through initial convolution independently
@@ -843,6 +844,105 @@ class VisionLanguageAdapter(nn.Module):
         return self.w_out(self.gelu(self.w_in(x)))
 
 
+class PatchMerger(nn.Module):
+    """
+    Learned merging of spatial_merge_size ** 2 patches
+    """
+
+    def __init__(
+        self,
+        vision_encoder_dim: int,
+        spatial_merge_size: int,
+        use_mlp_bias: bool = False,
+    ) -> None:
+        super().__init__()
+
+        mlp_input_dim = vision_encoder_dim * (spatial_merge_size**2)
+
+        self.spatial_merge_size = spatial_merge_size
+        self.mlp_input_dim = mlp_input_dim
+
+        self.merging_layer = nn.Linear(
+            mlp_input_dim,
+            vision_encoder_dim,
+            bias=use_mlp_bias,
+        )
+
+    def forward(self, x: torch.Tensor,
+                image_sizes: list[tuple[int, int]]) -> torch.Tensor:
+        # image_sizes specified in tokens
+        assert sum([h * w for h, w in image_sizes]) == len(x)
+
+        # x is (N, vision_encoder_dim)
+        x = self.permute(x, image_sizes)
+
+        # x is (N / spatial_merge_size ** 2,
+        #       vision_encoder_dim * spatial_merge_size ** 2)
+        x = self.merging_layer(x)
+
+        # x is (N / spatial_merge_size ** 2, vision_encoder_dim)
+        return x
+
+    def permute(
+        self,
+        x: torch.Tensor,
+        image_sizes: list[tuple[int, int]],
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: (N, D) where N is flattened and concatenated patch tokens
+                for all images
+            image_sizes: list of tuple of (height, width) in tokens for
+                each image
+        Returns:
+            image_features: reorders patch tokens so each grid of
+                (spatial_merge_size, spatial_merge_size) is contiguous.
+                now (N / spatial_merge_size ** 2, D * spatial_merge_size ** 2)
+        """
+
+        sub_grids = get_sub_grids(
+            x=x,
+            image_sizes=image_sizes,
+            spatial_merge_size=self.spatial_merge_size
+        )  # list of [d x sub_grid_size x sub_grid_size x n_patches]
+        permuted_tensor: list[torch.Tensor] = []
+        for grid in sub_grids:
+            n_patches = grid.shape[-1]
+            permuted_tensor.append(grid.view(-1, n_patches).t(
+            ))  # n_patches x d * sub_grid_size * sub_grid_size
+        return torch.cat(
+            permuted_tensor, dim=0
+        )  # (N / spatial_merge_size ** 2, d * spatial_merge_size ** 2)
+
+
+def get_sub_grids(
+    x: torch.Tensor,
+    image_sizes: list[tuple[int, int]],
+    spatial_merge_size: int,
+) -> list[torch.Tensor]:
+    # image_sizes specified in tokens
+    tokens_per_image = [h * w for h, w in image_sizes]
+    d = x.shape[-1]
+    all_img_sub_grids: list[torch.Tensor] = []
+    sub_grid_size = spatial_merge_size
+
+    for image_index, image_tokens in enumerate(x.split(tokens_per_image)):
+        # Reshape image_tokens into a 2D grid
+        h, w = image_sizes[image_index]
+        image_grid = image_tokens.view(h, w, d).permute(
+            2, 0, 1)[None, :, :, :]  # 1 x d x h x w
+        sub_grids = torch.nn.functional.unfold(image_grid,
+                                               kernel_size=sub_grid_size,
+                                               stride=sub_grid_size)
+        sub_grids = sub_grids.view(
+            1, d, sub_grid_size, sub_grid_size,
+            -1)  # 1 x d x sub_grid_size x sub_grid_size x n_patches
+
+        all_img_sub_grids.append(sub_grids[0])
+
+    return all_img_sub_grids
+
+
 #### HF Transformers version of Pixtral ####
 # Based off https://github.com/huggingface/transformers/blob/d7950bff82b18c823193d17d72188c5e46d06c83/src/transformers/models/pixtral/modeling_pixtral.py
 # This model follows the Llava family, meaning image embeddings are placed
@@ -879,7 +979,8 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         return self.vision_config.image_size
 
     def get_patch_size(self) -> int:
-        return self.vision_config.patch_size
+        return (self.vision_config.patch_size *
+                self.vision_config.spatial_merge_size)
 
     def get_patch_grid_length(self) -> int:
         image_size, patch_size = self.get_image_size(), self.get_patch_size()
@@ -901,8 +1002,8 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         ratio = max(image_width / max_width, image_height / max_height)
 
         if ratio > 1:
-            image_width = int(math.ceil(image_width / ratio))
-            image_height = int(math.ceil(image_height / ratio))
+            image_width = int(math.floor(image_width / ratio))
+            image_height = int(math.floor(image_height / ratio))
 
         nrows, ncols = _get_pixtral_hf_num_image_tokens(
             (image_height, image_width),

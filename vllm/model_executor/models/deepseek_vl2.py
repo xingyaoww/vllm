@@ -478,7 +478,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                     flatten_bn(images_spatial_crop, concat=True)))
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, torch.Tensor):
+            if not isinstance(image_embeds, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
 
@@ -509,7 +509,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         _, hw, n_dim = images_embeds.shape
         h = w = int(hw**0.5)
 
-        # 根据self.tile_tag & self.global_view_pos填充image token sequence
+        # fill image token based on self.tile_tag & self.global_view_pos
         tile_index = 0
         vision_embeddings = []
         for jdx in range(images_spatial_crop.size(0)):

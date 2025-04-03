@@ -16,7 +16,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.adapters import (as_classification_model,
                                                  as_embedding_model,
-                                                 as_reward_model)
+                                                 as_reward_model,
+                                                 as_token_reward_model)
 
 logger = init_logger(__name__)
 
@@ -32,20 +33,17 @@ def set_default_torch_dtype(dtype: torch.dtype):
 
 def is_transformers_impl_compatible(
         arch: str,
-        module: Optional[transformers.PreTrainedModel] = None) -> bool:
+        module: Optional["transformers.PreTrainedModel"] = None) -> bool:
     mod = module or getattr(transformers, arch, None)
     if mod is None:
         return False
-    if hasattr(mod, "supports_backend"):
-        return mod.is_backend_compatible()
-    else:
-        return mod._supports_flex_attn
+    return mod.is_backend_compatible()
 
 
-def resolve_transformers_fallback(model_config: ModelConfig,
-                                  architectures: list[str]):
+def resolve_transformers_arch(model_config: ModelConfig,
+                              architectures: list[str]):
     for i, arch in enumerate(architectures):
-        if arch == "TransformersModel":
+        if arch == "TransformersForCausalLM":
             continue
         auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
                                            None) or dict()
@@ -69,7 +67,7 @@ def resolve_transformers_fallback(model_config: ModelConfig,
                 raise ValueError(
                     f"The Transformers implementation of {arch} is not "
                     "compatible with vLLM.")
-            architectures[i] = "TransformersModel"
+            architectures[i] = "TransformersForCausalLM"
         if model_config.model_impl == ModelImpl.AUTO:
             if not is_transformers_impl_compatible(arch, custom_model_module):
                 raise ValueError(
@@ -80,7 +78,7 @@ def resolve_transformers_fallback(model_config: ModelConfig,
                 "%s has no vLLM implementation, falling back to Transformers "
                 "implementation. Some features may not be supported and "
                 "performance may not be optimal.", arch)
-            architectures[i] = "TransformersModel"
+            architectures[i] = "TransformersForCausalLM"
     return architectures
 
 
@@ -104,8 +102,7 @@ def get_model_architecture(
                             for arch in architectures)
     if (not is_vllm_supported
             or model_config.model_impl == ModelImpl.TRANSFORMERS):
-        architectures = resolve_transformers_fallback(model_config,
-                                                      architectures)
+        architectures = resolve_transformers_arch(model_config, architectures)
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
     if model_config.task == "embed":
@@ -114,6 +111,8 @@ def get_model_architecture(
         model_cls = as_classification_model(model_cls)
     elif model_config.task == "reward":
         model_cls = as_reward_model(model_cls)
+    elif model_config.task == "token_reward":
+        model_cls = as_token_reward_model(model_cls)
 
     return model_cls, arch
 

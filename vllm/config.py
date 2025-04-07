@@ -60,7 +60,7 @@ logger = init_logger(__name__)
 # This value is chosen to have a balance between ITL and TTFT. Note it is
 # not optimized for throughput.
 _DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
-_POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 8192
+_POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 4096
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",

@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING, Any, Optional, TypeVar
 import torch
 import torch.nn as nn
 
+from vllm.logger import init_logger
 from .interfaces_base import VllmModelForPooling, is_pooling_model
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.pooler import PoolingType
@@ -288,12 +291,19 @@ def as_token_reward_model(cls: _T) -> _T:
             super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
             config = vllm_config.model_config.hf_config
-            quant_config = vllm_config.quant_config
+            # Disable quantization for the classification head to avoid dimension issues
+            # with small num_labels values that aren't multiples of 16
             print("CONFIG.NUM_LABELS", config.num_labels)
+            
+            if vllm_config.quant_config is not None:
+                logger.warning(
+                    "Quantization is disabled for the token classification head to avoid "
+                    "dimension compatibility issues. The rest of the model remains quantized."
+                )
 
             self.score = RowParallelLinear(config.hidden_size,
                                            config.num_labels,
-                                           quant_config=quant_config,
+                                           quant_config=None,  # Force full precision for classification head
                                            input_is_parallel=False,
                                            bias=True,
                                            prefix=maybe_prefix(

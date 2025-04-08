@@ -24,8 +24,9 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .blip import BlipVisionModel
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, init_vllm_registered_model,
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
+                         SupportsQuant)
+from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
 # We use this internally as placeholders since there is no image token
@@ -498,7 +499,8 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(Blip2MultiModalProcessor,
                                         info=Blip2ProcessingInfo,
                                         dummy_inputs=Blip2DummyInputsBuilder)
-class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
+                                    SupportsQuant):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
 
@@ -565,12 +567,11 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             return None
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, torch.Tensor):
+            if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            # Remove the N dimension until multiple images are supported.
-            pixel_values = pixel_values.squeeze(1)
+            pixel_values = flatten_bn(pixel_values, concat=True)
 
             return Blip2ImagePixelInputs(
                 type="pixel_values",
@@ -578,12 +579,11 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, torch.Tensor):
+            if not isinstance(image_embeds, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
 
-            # Remove the N dimension until multiple images are supported.
-            image_embeds = image_embeds.squeeze(1)
+            image_embeds = flatten_bn(image_embeds, concat=True)
 
             return Blip2ImageEmbeddingInputs(
                 type="image_embeds",

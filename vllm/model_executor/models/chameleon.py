@@ -38,8 +38,9 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
+                         SupportsQuant)
+from .utils import (flatten_bn, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -927,7 +928,11 @@ class ChameleonModel(nn.Module):
     info=ChameleonProcessingInfo,
     dummy_inputs=ChameleonDummyInputsBuilder)
 class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                        SupportsPP):
+                                        SupportsPP, SupportsQuant):
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -972,12 +977,11 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         if pixel_values is None:
             return None
 
-        if not isinstance(pixel_values, torch.Tensor):
+        if not isinstance(pixel_values, (torch.Tensor, list)):
             raise ValueError("Incorrect type of pixel values. "
                              f"Got type: {type(pixel_values)}")
 
-        # Remove the N dimension until multiple images are supported.
-        pixel_values = pixel_values.squeeze(1)
+        pixel_values = flatten_bn(pixel_values, concat=True)
 
         return ChameleonImagePixelInputs(
             type="pixel_values",

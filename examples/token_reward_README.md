@@ -66,7 +66,11 @@ The token-level reward adapter works with any model that can be loaded by vLLM. 
 The token-level reward adapter:
 
 1. Uses the `ALL` pooling type to get representations for all tokens
-2. Applies a dropout layer followed by a linear classification head
+2. Applies a linear classification head to each token representation
 3. Returns the logits for each token
 
 This implementation extends the standard reward model adapter in vLLM to support token-level predictions, making it suitable for fine-grained token-level assessment tasks.
+
+## Quantization Note
+
+When using token-level reward models with quantized models (e.g., FP8, INT8), the classification head will automatically use full precision (FP16/FP32) even if the rest of the model is quantized. This is because quantization libraries like CUTLASS require tensor dimensions to be multiples of 16, which is often not the case for the classification head's output dimension (num_labels).

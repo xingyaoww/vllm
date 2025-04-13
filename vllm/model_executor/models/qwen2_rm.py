@@ -128,3 +128,24 @@ class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):
             softmax=True,
             step_tag_id=151651,
         )
+
+
+class Qwen2ForTokenClassification(Qwen2RewardBaseModel):
+    """Qwen2 model with a token classification head on top.
+    
+    This model is designed for token-level classification tasks such as NER,
+    POS tagging, or token-level quality assessment.
+    """
+
+    def __init__(self, *, vllm_config, prefix=""):
+        # Use the existing num_labels from the config
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        pooler_config = vllm_config.model_config.pooler_config
+        
+        # Initialize the pooler for token-level predictions
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.ALL,  # Use ALL to get representations for all tokens
+            normalize=False,
+            softmax=False
+        )

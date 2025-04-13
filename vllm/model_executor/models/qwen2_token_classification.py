@@ -1,28 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Implementation of Qwen2ForTokenClassification for vLLM."""
+"""Inference-only Qwen2ForTokenClassification model compatible with HuggingFace weights."""
 
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsV0Only
 from .qwen2 import Qwen2Model
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix
 
 logger = init_logger(__name__)
 
 
-class Qwen2ForTokenClassification(nn.Module, SupportsLoRA, SupportsPP):
+class Qwen2ForTokenClassification(nn.Module, SupportsLoRA, SupportsPP, SupportsV0Only):
     """Qwen2 model with a token classification head on top.
     
     This model is designed for token-level classification tasks such as NER,
@@ -41,8 +40,6 @@ class Qwen2ForTokenClassification(nn.Module, SupportsLoRA, SupportsPP):
         ],
     }
 
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -59,27 +56,21 @@ class Qwen2ForTokenClassification(nn.Module, SupportsLoRA, SupportsPP):
                               prefix=maybe_prefix(prefix, "model"))
 
         # Initialize the token classification head
-        if get_pp_group().is_last_rank:
-            # Disable quantization for the classification head to avoid dimension issues
-            # with small num_labels values that aren't multiples of 16
-            if quant_config is not None:
-                logger.info(
-                    "Quantization is disabled for the token classification head to avoid "
-                    "dimension compatibility issues. The rest of the model remains quantized."
-                )
-            
-            # Create the classification head
-            self.classifier = RowParallelLinear(
-                config.hidden_size,
-                config.num_labels,
-                quant_config=None,  # Force full precision for classification head
-                input_is_parallel=False,
-                bias=True,
-                prefix=maybe_prefix(prefix, "classifier")
+        # Disable quantization for the classification head to avoid dimension issues
+        if quant_config is not None:
+            logger.info(
+                "Quantization is disabled for the token classification head to avoid "
+                "dimension compatibility issues. The rest of the model remains quantized."
             )
-        else:
-            from .utils import PPMissingLayer
-            self.classifier = PPMissingLayer()
+        
+        # Create the classification head (simple linear layer)
+        self.classifier = RowParallelLinear(
+            config.hidden_size,
+            config.num_labels,
+            quant_config=None,  # Force full precision for classification head
+            bias=True,
+            prefix=maybe_prefix(prefix, "classifier")
+        )
 
         # Initialize the pooler for token-level predictions
         self._pooler = Pooler.from_config_with_defaults(
@@ -88,6 +79,12 @@ class Qwen2ForTokenClassification(nn.Module, SupportsLoRA, SupportsPP):
             normalize=False,
             softmax=False
         )
+        
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -96,17 +93,6 @@ class Qwen2ForTokenClassification(nn.Module, SupportsLoRA, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Forward pass for token classification.
-        
-        Args:
-            input_ids: Input token IDs.
-            positions: Position IDs.
-            intermediate_tensors: Intermediate tensors from previous pipeline stages.
-            inputs_embeds: Pre-computed input embeddings (optional).
-            
-        Returns:
-            Token-level logits for each input token.
-        """
         # Get hidden states from the base model
         hidden_states = self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
         
@@ -120,31 +106,9 @@ class Qwen2ForTokenClassification(nn.Module, SupportsLoRA, SupportsPP):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
-        """Apply pooling to the hidden states.
-        
-        For token classification, we use ALL pooling to get representations for all tokens.
-        
-        Args:
-            hidden_states: Hidden states from the model.
-            pooling_metadata: Metadata for pooling.
-            
-        Returns:
-            Pooled output with token-level representations.
-        """
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
-        """Load weights for the model.
-        
-        Args:
-            weights: Iterable of (name, tensor) tuples.
-            
-        Returns:
-            Set of loaded parameter names.
-        """
-        # Map HF weights to vLLM weights
-        weights = self.hf_to_vllm_mapper.apply(weights)
-        
-        # Use AutoWeightsLoader to load the weights
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self,
+                                  ignore_unexpected_prefixes=["lm_head."])
         return loader.load_weights(weights)

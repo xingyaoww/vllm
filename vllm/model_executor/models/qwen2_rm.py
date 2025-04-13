@@ -130,25 +130,18 @@ class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):
         )
 
 
-class Qwen2ForTokenClassification(Qwen2ForCausalLM):
+class Qwen2ForTokenClassification(Qwen2RewardBaseModel):
     """Qwen2 model with a token classification head on top.
     
     This model is designed for token-level classification tasks such as NER,
     POS tagging, or token-level quality assessment.
-    
-    Note: This implementation inherits from Qwen2ForCausalLM to ensure
-    compatibility with the token reward adapter, which expects certain
-    attributes like embed_tokens to be available.
     """
 
     def __init__(self, *, vllm_config, prefix=""):
-        # Initialize the base model
+        # Initialize the base model with Qwen2RewardBaseModel
+        # which already has the score head we need
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         
-        # We don't need the LM head for token classification
-        if hasattr(self, "lm_head"):
-            delattr(self, "lm_head")
-            
         # Initialize the pooler for token-level predictions
         pooler_config = vllm_config.model_config.pooler_config
         self._pooler = Pooler.from_config_with_defaults(
@@ -157,24 +150,3 @@ class Qwen2ForTokenClassification(Qwen2ForCausalLM):
             normalize=False,
             softmax=False
         )
-        
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Forward pass for token classification.
-        
-        Returns hidden states for all tokens, which can be used by the
-        token reward adapter to apply a classification head.
-        """
-        # Get the hidden states from the model
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds)
-            
-        # Apply pooling to get token-level representations
-        pooled_output = self._pooler(hidden_states, None)
-        
-        return pooled_output

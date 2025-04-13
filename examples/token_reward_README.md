@@ -56,10 +56,17 @@ python token_reward_example.py --model path/to/your/model --num-labels 2
 
 The token-level reward adapter works with any model that can be loaded by vLLM. For example:
 
-- Qwen2ForTokenClassification
 - BertForTokenClassification
 - RobertaForTokenClassification
 - And many more!
+
+### Native vLLM Implementations
+
+vLLM now includes native implementations for the following token classification models:
+
+- **Qwen2ForTokenClassification**: A native vLLM implementation that provides optimal performance for token classification tasks with Qwen2 models.
+
+See the `qwen2_token_classification_example.py` script for a demonstration of using the native Qwen2ForTokenClassification implementation.
 
 ## Implementation Details
 
